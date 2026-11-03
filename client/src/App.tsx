@@ -115,9 +115,9 @@ export default function App() {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Load last joined room from localStorage on mount
+  // Load last joined room from sessionstorage on mount
   useEffect(() => {
-    const savedRoom = localStorage.getItem('p2p_room');
+    const savedRoom = sessionStorage.getItem('p2p_room');
     if (savedRoom) {
       setRoomInput(savedRoom);
     }
@@ -130,7 +130,7 @@ export default function App() {
       }
       catch (err) {
         console.error('Failed to auto-join room:', err);
-        localStorage.removeItem('p2p_room');
+        sessionStorage.removeItem('p2p_room');
       }
     }
     autoJoin();
@@ -146,7 +146,7 @@ export default function App() {
     }
     await signalingService.joinRoom(trimmed);
     setCurrentRoom(trimmed);
-    localStorage.setItem('p2p_room', trimmed);
+    sessionStorage.setItem('p2p_room', trimmed);
     setMessages([]);
     setTransfers({});
   }
@@ -156,7 +156,7 @@ export default function App() {
     await signalingService.leaveRoom(currentRoom);
     webRTCService.closeAllConnections();
     setCurrentRoom(null);
-    localStorage.removeItem('p2p_room');
+    sessionStorage.removeItem('p2p_room');
     setMessages([]);
     setTransfers({});
   }

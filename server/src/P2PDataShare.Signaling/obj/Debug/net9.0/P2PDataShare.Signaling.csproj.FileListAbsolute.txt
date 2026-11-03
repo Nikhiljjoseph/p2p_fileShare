@@ -26,3 +26,4 @@ C:\Users\Asus\OneDrive\Desktop\p2p-datashare-webrtc\server\src\P2PDataShare.Sign
 C:\Users\Asus\OneDrive\Desktop\p2p-datashare-webrtc\server\src\P2PDataShare.Signaling\obj\Debug\net9.0\P2PDataShare.Signaling.pdb
 C:\Users\Asus\OneDrive\Desktop\p2p-datashare-webrtc\server\src\P2PDataShare.Signaling\obj\Debug\net9.0\P2PDataShare.Signaling.genruntimeconfig.cache
 C:\Users\Asus\OneDrive\Desktop\p2p-datashare-webrtc\server\src\P2PDataShare.Signaling\obj\Debug\net9.0\ref\P2PDataShare.Signaling.dll
+C:\Users\Asus\OneDrive\Desktop\p2p-datashare-webrtc\server\src\P2PDataShare.Signaling\obj\Debug\net9.0\P2PDataShare.Signaling.sourcelink.json
