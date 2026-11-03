@@ -20,7 +20,7 @@ Designed to support multi-peer room meshing, concurrent multi-file streaming wit
 
 ## Architecture & Technical Highlights
 
---                   
+```                   
        ┌─────────────────────────────────────────────────────────────┐
        │                    SIGNALING SERVER                         │
        │  (Coordinates room lookups, SDP offers, and ICE candidates) │
@@ -38,6 +38,7 @@ Designed to support multi-peer room meshing, concurrent multi-file streaming wit
         ├──  chat-channel               ├──  chat-channel
         ├──  file-{uuid-1}              └──  file-{uuid-1}
         └──  file-{uuid-2}              └──  file-{uuid-2}
+```
 
 - **Signaling & Handshake:** WebRTC SDP Offers/Answers and ICE candidates are exchanged via a SignalR server hub to establish direct encryption between browsers.
 - **Channel Separation:** Unlike naive implementations that multiplex everything over a single pipe, this architecture treats every file transfer as an independent micro-stream with its own `RTCDataChannel`.
