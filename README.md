@@ -14,7 +14,7 @@ Designed to support multi-peer room meshing, concurrent multi-file streaming wit
 - **Network Backpressure Control:** Implements `bufferedAmountLowThreshold` and `bufferedamountlow` event listeners on the sender side to monitor socket congestion and prevent browser memory overflow when streaming large files.
 - **Multi-File Concurrent Progress:** A reactive UI state dictionary tracking multiple concurrent uploads and downloads simultaneously with individual progress bars.
 - **Graceful Abort & Cancellation:** Built with `AbortController` support to instantly halt transfers, tear down specific data channels, and broadcast clean cancellation packets to peers.
-- **Session Auto-Reconnect:** Seamlessly persists and restores room state via `localStorage` on page refresh.
+- **Session Auto-Reconnect:** Seamlessly persists and restores room state via `sessionStorage` on page refresh.
 
 ---
 
