@@ -1,0 +1,3 @@
+﻿<Project>
+  <Import Project="..\buildMultiTargeting\P2PDataShare.Signaling.props" />
+</Project>

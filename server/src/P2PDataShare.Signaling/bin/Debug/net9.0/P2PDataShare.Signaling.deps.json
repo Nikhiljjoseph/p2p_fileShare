@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v9.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v9.0": {
+      "P2PDataShare.Signaling/1.0.0": {
+        "runtime": {
+          "P2PDataShare.Signaling.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "P2PDataShare.Signaling/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

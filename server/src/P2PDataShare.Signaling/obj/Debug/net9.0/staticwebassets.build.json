@@ -1,0 +1,12 @@
+{
+  "Version": 1,
+  "Hash": "LQlhVtjfJ9Ll0QPXbh6T43i5l5mkhKLMjqdFbMHkPyc=",
+  "Source": "P2PDataShare.Signaling",
+  "BasePath": "_content/P2PDataShare.Signaling",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": [],
+  "Endpoints": []
+}
