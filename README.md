@@ -52,4 +52,10 @@ Designed to support multi-peer room meshing, concurrent multi-file streaming wit
 - Type a room name and click Join Room.
 - Once peers are detected in the connected list, use the attachment button (📎) to select one or multiple files to stream concurrently.
 - Monitor live progress, cancel mid-transfer if needed, or chat in real time.
+
+---
+
+## License
+
+Distributed under the MIT License. See LICENSE for more information.
    
