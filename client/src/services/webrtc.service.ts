@@ -6,8 +6,11 @@ const RTC_CONFIG: RTCConfiguration = {
     ],
 };
 
-const CHUNK_SIZE = 16 * 1024; // 16KB chunk size 
+const CHUNK_SIZE = 16 * 1024; // 16KB chunk size
 const BUFFER_THRESHOLD = 64 * 1024; // 64KB untill the buffer is full
+const CHAT_CHANNEL_LABEL = 'chat-channel'; // must match on both ends of the router
+const FILE_CHANNEL_PREFIX = 'file-';
+const CHANNEL_OPEN_TIMEOUT = 15000; // give a fresh file channel this long to open
 
 export interface FileMetadata {
     type: 'file-meta';
@@ -31,6 +34,9 @@ interface IncomingTransfer {
 interface PeerSession{
     peerConnection: RTCPeerConnection;
     dataChannel: RTCDataChannel|null;
+    // ICE can arrive before the offer/answer is applied; hold them until then
+    pendingCandidates: RTCIceCandidateInit[];
+    hasRemoteDescription: boolean;
 }
 
 export class WebRTCService {
@@ -45,6 +51,11 @@ export class WebRTCService {
 
     constructor() {
         this.setupSignalListeners();
+    }
+
+    // Incoming transfers are keyed per sender so two peers can push concurrently
+    private transferKey(peerId:string, fileId:string): string {
+        return `${peerId}::${fileId}`;
     }
 
     // Set up listeners for signaling events from the signaling service
@@ -62,13 +73,19 @@ export class WebRTCService {
                 await this.handleAnswer(senderId, sdp);
             }
         }
-        
+
         // When we receive an ICE candidate from a peer, we add it to our peer connection
         signalingService.onIceCandidateReceived = async (senderId, candidate, sdpMid, sdpMLineIndex) => {
             const session = this.peers.get(senderId);
             if(!session) {return;}
+            const init: RTCIceCandidateInit = { candidate, sdpMid, sdpMLineIndex };
+            // addIceCandidate throws if the remote description isn't applied yet
+            if(!session.hasRemoteDescription){
+                session.pendingCandidates.push(init);
+                return;
+            }
             try {
-                await session.peerConnection.addIceCandidate(new RTCIceCandidate({ candidate, sdpMid, sdpMLineIndex }));
+                await session.peerConnection.addIceCandidate(new RTCIceCandidate(init));
             } catch (error) {
                 console.error("Error adding received ICE candidate", error);
             }
@@ -80,20 +97,37 @@ export class WebRTCService {
         }
     }
 
+    // Drain candidates that arrived before setRemoteDescription
+    private async flushPendingCandidates(session: PeerSession): Promise<void> {
+        const queued = session.pendingCandidates.splice(0, session.pendingCandidates.length);
+        for(const init of queued){
+            try {
+                await session.peerConnection.addIceCandidate(new RTCIceCandidate(init));
+            } catch (error) {
+                console.error("Error adding queued ICE candidate", error);
+            }
+        }
+    }
+
     // Get or create a peer connection for a specific target peer
     private getOrCreatePeer(peerId:string): PeerSession {
         const existing = this.peers.get(peerId);
         if(existing) return existing;
 
         const pc = new RTCPeerConnection(RTC_CONFIG);
-        const session: PeerSession = { peerConnection: pc, dataChannel: null };
+        const session: PeerSession = {
+            peerConnection: pc,
+            dataChannel: null,
+            pendingCandidates: [],
+            hasRemoteDescription: false,
+        };
         // Whenever the browser discovers a public IP candidate from STUN, send it to the other peer
         pc.onicecandidate = (event) => {
             if(event.candidate) {
                 signalingService.sendIceCandidate(
-                    peerId, 
-                    event.candidate.candidate, 
-                    event.candidate.sdpMid, 
+                    peerId,
+                    event.candidate.candidate,
+                    event.candidate.sdpMid,
                     event.candidate.sdpMLineIndex
                 );
             }
@@ -101,22 +135,24 @@ export class WebRTCService {
 
         //habdle peer disconnection
         pc.onconnectionstatechange = () => {
-            if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') 
+            if(pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed')
                 this.removePeer(peerId);
         }
 
-        //binds appropriate data channels for chat and file transfer
+        // Single source of truth for channel routing. Never reassign this handler
+        // elsewhere -- doing so makes file channels get bound as the chat channel.
         pc.ondatachannel = (event) => {
             const channel = event.channel;
-            if(channel.label.startsWith('file-')){
-                const fileId = channel.label.replace('file-', '');
+            if(channel.label.startsWith(FILE_CHANNEL_PREFIX)){
+                const fileId = channel.label.slice(FILE_CHANNEL_PREFIX.length);
                 this.bindFileRecieverChannel(peerId, fileId, channel);
                 return;
             }
-            if(channel.label === 'chat-channel'){
-                session.dataChannel = channel;
+            if(channel.label === CHAT_CHANNEL_LABEL){
                 this.bindChatDataChannel(peerId, session, channel);
+                return;
             }
+            console.warn(`[WebRTC] Ignoring data channel with unknown label "${channel.label}"`);
         }
         this.peers.set(peerId, session);
         return session;
@@ -125,7 +161,11 @@ export class WebRTCService {
     // Create an SDP offer for a specific target peer and send it via the signaling service
     public async createOffer(targetPeerId:string): Promise<void> {
         const session = this.getOrCreatePeer(targetPeerId);
-        const dc = session.peerConnection.createDataChannel('data-channel');
+        // Guard against a duplicate PeerJoined re-offering over a live connection
+        if(session.dataChannel || session.peerConnection.signalingState !== 'stable'){
+            return;
+        }
+        const dc = session.peerConnection.createDataChannel(CHAT_CHANNEL_LABEL);
         this.bindChatDataChannel(targetPeerId, session, dc);
         const offer = await session.peerConnection.createOffer();
         await session.peerConnection.setLocalDescription(offer);
@@ -135,10 +175,9 @@ export class WebRTCService {
     // Handle an incoming SDP offer from a peer, create an answer, and send it back
     private async handleOffer(senderId:string, sdpOffer:string): Promise<void> {
         const session = this.getOrCreatePeer(senderId);
-        session.peerConnection.ondatachannel = (event) => {
-            this.bindChatDataChannel(senderId, session, event.channel);
-        }
         await session.peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sdpOffer }));
+        session.hasRemoteDescription = true;
+        await this.flushPendingCandidates(session);
         const answer = await session.peerConnection.createAnswer();
         await session.peerConnection.setLocalDescription(answer);
         await signalingService.sendSdp(senderId, answer.sdp ?? '', 'answer');
@@ -149,9 +188,11 @@ export class WebRTCService {
         const session = this.peers.get(senderId);
         if(!session) return;
         await session.peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sdpAnswer }));
+        session.hasRemoteDescription = true;
+        await this.flushPendingCandidates(session);
     }
 
-    // channel for text messages 
+    // channel for text messages
     private bindChatDataChannel(peerId:string, session: PeerSession, channel: RTCDataChannel): void {
         session.dataChannel = channel;
         channel.binaryType = 'arraybuffer'; // failsafe
@@ -159,7 +200,8 @@ export class WebRTCService {
             this.notifyPeersChange();
         }
         channel.onclose = () => {
-            this.removePeer(peerId);
+            // Only the live chat channel tearing down means we lost the peer
+            if(session.dataChannel === channel) this.removePeer(peerId);
         }
         channel.onmessage = (event) => {
             if(typeof event.data === 'string') {
@@ -171,13 +213,19 @@ export class WebRTCService {
     //channel for concurrent file transfers
     private bindFileRecieverChannel(peerId:string, fileId: string, channel: RTCDataChannel): void {
         channel.binaryType = 'arraybuffer';
+        const key = this.transferKey(peerId, fileId);
+
+        // A file channel closing is normal end-of-transfer, never a peer teardown
+        channel.onclose = () => {
+            this.activeIncoming.delete(key);
+        }
 
         channel.onmessage = (event) => {
             if(typeof event.data === 'string') {
                 try {
                     const parsed = JSON.parse(event.data);
                     if(parsed.type === 'file-meta') {
-                        this.activeIncoming.set(fileId, {
+                        this.activeIncoming.set(key, {
                         meta: parsed,
                         recievedChunks: [],
                         receivedBytes: 0
@@ -186,9 +234,9 @@ export class WebRTCService {
                     return;
                     }
                     if(parsed.type === 'file-cancel') {
-                        const transfer = this.activeIncoming.get(fileId);
+                        const transfer = this.activeIncoming.get(key);
                         const fileName = transfer?.meta.fileName ?? 'Transfer';
-                        this.activeIncoming.delete(fileId);
+                        this.activeIncoming.delete(key);
                         this.onFileCancelled?.(peerId, fileId, fileName);
                         return;
                     }
@@ -198,7 +246,7 @@ export class WebRTCService {
                 return;
             }
             if(event.data instanceof ArrayBuffer) {
-                const transfer = this.activeIncoming.get(fileId);
+                const transfer = this.activeIncoming.get(key);
                 if(!transfer) return;
 
                 transfer.recievedChunks.push(event.data);
@@ -207,11 +255,11 @@ export class WebRTCService {
                 const percent = Math.min(Math.round((transfer.receivedBytes / transfer.meta.fileSize) * 100), 100);
                 this.onFileProgress?.(peerId, fileId, transfer.meta.fileName, percent);
 
-                if(transfer.recievedChunks.length >= transfer.meta.totalChunks) {
+                if(transfer.receivedBytes >= transfer.meta.fileSize) {
                     const finalBlob = new Blob(transfer.recievedChunks);
                     this.onFileReceived?.(peerId, transfer.meta.fileName, finalBlob);
-                    this.activeIncoming.delete(fileId);
-                    channel.close(); 
+                    this.activeIncoming.delete(key);
+                    channel.close();
                 }
             }
         }
@@ -231,6 +279,10 @@ export class WebRTCService {
             session.dataChannel?.close();
             session.peerConnection.close();
             this.peers.delete(peerId);
+            // drop any half-received transfers from this peer
+            for(const key of Array.from(this.activeIncoming.keys())){
+                if(key.startsWith(`${peerId}::`)) this.activeIncoming.delete(key);
+            }
             this.notifyPeersChange();
         }
     }
@@ -264,69 +316,115 @@ export class WebRTCService {
         // notification happens in sendFile method
     }
 
+    // Resolve true once the channel is usable, false if it never gets there.
+    private waitForChannelOpen(dc: RTCDataChannel, signal: AbortSignal): Promise<boolean> {
+        if(dc.readyState === 'open') return Promise.resolve(true);
+        if(dc.readyState === 'closing' || dc.readyState === 'closed') return Promise.resolve(false);
+
+        return new Promise<boolean>((resolve) => {
+            const settle = (ok: boolean) => {
+                clearTimeout(timer);
+                dc.removeEventListener('open', onOpen);
+                dc.removeEventListener('error', onFail);
+                dc.removeEventListener('close', onFail);
+                signal.removeEventListener('abort', onFail);
+                resolve(ok);
+            };
+            const onOpen = () => settle(true);
+            const onFail = () => settle(false);
+            const timer = setTimeout(onFail, CHANNEL_OPEN_TIMEOUT);
+
+            dc.addEventListener('open', onOpen, { once: true });
+            dc.addEventListener('error', onFail, { once: true });
+            dc.addEventListener('close', onFail, { once: true });
+            signal.addEventListener('abort', onFail, { once: true });
+        });
+    }
+
+    // Wait for a congested channel to drain, bailing out on abort or close.
+    private waitForDrain(dc: RTCDataChannel, signal: AbortSignal): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            const cleanup = () => {
+                dc.removeEventListener('bufferedamountlow', onDrain);
+                dc.removeEventListener('close', onClose);
+                signal.removeEventListener('abort', onAbort);
+            };
+            const onDrain = () => { cleanup(); resolve(); };
+            const onClose = () => { cleanup(); resolve(); }; // dropped peer, skipped by readyState check
+            const onAbort = () => { cleanup(); reject(new DOMException('File transfer aborted', 'AbortError')); };
+
+            dc.addEventListener('bufferedamountlow', onDrain, { once: true });
+            dc.addEventListener('close', onClose, { once: true });
+            signal.addEventListener('abort', onAbort, { once: true });
+        });
+    }
+
     public async sendFile(file: File, onFileReady?:(fileId: string)=> void, onProgress?: (percent: number)=> void): Promise<string> {
         const fileId = crypto.randomUUID();
         const abortController = new AbortController();
+        const signal = abortController.signal;
         this.activeUploads.set(fileId, abortController);
         onFileReady?. (fileId);
 
-        const fileChannels:RTCDataChannel[] = [];
+        // Open one dedicated channel per peer that has a live chat channel --
+        // an open chat channel proves the SCTP association is up, which is all
+        // a new data channel needs (no renegotiation required).
+        const openedChannels:RTCDataChannel[] = [];
         for(const[_, session] of this.peers){
-            if(session.peerConnection.connectionState === 'connected'){
-                const dc = session.peerConnection.createDataChannel(`file-${fileId}`);
+            if(session.dataChannel?.readyState === 'open'){
+                const dc = session.peerConnection.createDataChannel(`${FILE_CHANNEL_PREFIX}${fileId}`);
                 dc.binaryType = 'arraybuffer';
                 dc.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
-                fileChannels.push(dc);
+                openedChannels.push(dc);
             }
         }
 
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-        const meta: FileMetadata = {
-            type: 'file-meta',
-            fileId,
-            fileName: file.name,
-            fileSize: file.size,
-            totalChunks
-        };
-        //send metadata after channel opens
-        for(const channel of fileChannels){
-            if(channel.readyState === 'open'){
+        try{
+            // Must not start chunking before the channels are open, otherwise
+            // slow peers get their early chunks silently dropped.
+            const readiness = await Promise.all(
+                openedChannels.map((dc) => this.waitForChannelOpen(dc, signal))
+            );
+            const fileChannels = openedChannels.filter((_, i) => readiness[i]);
+
+            if(signal.aborted){
+                throw new DOMException('File transfer aborted', 'AbortError');
+            }
+            if(fileChannels.length === 0){
+                throw new Error('No peer accepted a file channel for this transfer');
+            }
+            if(fileChannels.length < openedChannels.length){
+                console.warn(`[WebRTC] ${openedChannels.length - fileChannels.length} peer(s) did not open a file channel in time`);
+            }
+
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            const meta: FileMetadata = {
+                type: 'file-meta',
+                fileId,
+                fileName: file.name,
+                fileSize: file.size,
+                totalChunks
+            };
+            for(const channel of fileChannels){
                 channel.send(JSON.stringify(meta));
             }
-            else{
-                channel.onopen = () => {
-                    channel.send(JSON.stringify(meta));
-                }
-            }
-        }
 
-        let offset = 0;
-        let chunksSent = 0;
+            let offset = 0;
+            let chunksSent = 0;
 
-        //send file in chunks
-        try{
+            //send file in chunks
             while(offset < file.size){
-                if(abortController.signal.aborted){
+                if(signal.aborted){
                     throw new DOMException('File transfer aborted', 'AbortError');
                 }
                 const slice = file.slice(offset, offset + CHUNK_SIZE);
                 const buffer = await slice.arrayBuffer();
                 for(const dc of fileChannels){
-                    if(!dc || dc.readyState !== 'open') continue;
+                    if(dc.readyState !== 'open') continue;
                     if(dc.bufferedAmount > BUFFER_THRESHOLD) {
-                        await new Promise<void>((resolve,reject)=>{
-                            const handleDrain = () => {
-                                dc.removeEventListener('bufferedamountlow', handleDrain);
-                                resolve();
-                            }
-                            const handleAbort = () => {
-                                dc.removeEventListener('bufferedamountlow', handleDrain);
-                                reject(new DOMException('File transfer aborted', 'AbortError'));
-                            }
-                            abortController.signal.addEventListener('abort', handleAbort, { once: true });
-                            dc.addEventListener('bufferedamountlow', handleDrain);
-                        });
+                        await this.waitForDrain(dc, signal);
                     }
+                    if(dc.readyState !== 'open') continue;
                     dc.send(buffer);
                 }
                 offset += CHUNK_SIZE;
@@ -337,22 +435,22 @@ export class WebRTCService {
                 }
             }
 
-            //close cannels afrer transfer
+            //close channels after transfer
             for(const dc of fileChannels){
                 if(dc.readyState === 'open') dc.close();
             }
             return fileId;
         }
         catch (error:any) {
-            const isAborted = error.name === 'AbortError';
-            for(const dc of fileChannels){
+            const isAborted = error?.name === 'AbortError';
+            for(const dc of openedChannels){
                 try{
                     if(dc.readyState === 'open') {
                         if(isAborted){
                             dc.send(JSON.stringify({ type: 'file-cancel', fileId }));
                         }
-                        dc.close();
                     }
+                    dc.close();
                 }
                 catch{}
             }
@@ -363,6 +461,6 @@ export class WebRTCService {
         }
 
     }
-};  
+};
 
 export const webRTCService = new WebRTCService();

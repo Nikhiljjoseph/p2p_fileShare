@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("P2PDataShare.Signaling")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+81b49cb727a602348b40ed57f2f250602531a2e9")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+0e3ba42ed7794c8e483aa4e4d25820c9f082834f")]
 [assembly: System.Reflection.AssemblyProductAttribute("P2PDataShare.Signaling")]
 [assembly: System.Reflection.AssemblyTitleAttribute("P2PDataShare.Signaling")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

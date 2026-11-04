@@ -11,7 +11,7 @@ export class SignalingService{
         this.hubConnection = new signalR.HubConnectionBuilder()
         .withUrl(hubUrl)
         .withAutomaticReconnect()
-        .build();''
+        .build();
 
         // Register event handlers for incoming messages from the SignalR hub
         this.hubConnection.on('PeerJoined',(peerId:string) => {

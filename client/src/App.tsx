@@ -49,11 +49,13 @@ export default function App() {
     }
 
     //incoming file transfer progress
-    webRTCService.onFileProgress = (_senderId, fileId, fileName, progressPercent) => {
+    // keyed per sender so two peers sending at once don't overwrite each other
+    webRTCService.onFileProgress = (senderId, fileId, fileName, progressPercent) => {
+      const key = `${senderId}::${fileId}`;
       setTransfers((prev) => ({
         ...prev,
-        [fileId]: {
-          fileId,
+        [key]: {
+          fileId: key,
           fileName,
           progress: progressPercent,
           type: 'download',
@@ -63,18 +65,19 @@ export default function App() {
         setTimeout(() => {
           setTransfers((prev) => {
             const copy = { ...prev };
-            delete copy[fileId];
+            delete copy[key];
             return copy;
           });
         }, 3000);
       }
     }
-    
+
     //incoming file transfer cancelled
     webRTCService.onFileCancelled = (senderId, fileId, fileName) => {
+      const key = `${senderId}::${fileId}`;
       setTransfers((prev) => {
         const copy = { ...prev };
-        delete copy[fileId];
+        delete copy[key];
         return copy;
       });
       setMessages((prev) => [
@@ -118,14 +121,13 @@ export default function App() {
   // Load last joined room from sessionstorage on mount
   useEffect(() => {
     const savedRoom = sessionStorage.getItem('p2p_room');
-    if (savedRoom) {
-      setRoomInput(savedRoom);
-    }
+    if (!savedRoom) return;
+    setRoomInput(savedRoom);
     const autoJoin = async () => {
       try {
         //tiny delay for establishing connection before joining room
         await new Promise((resolve) => setTimeout(resolve, 500));
-        await signalingService.joinRoom(savedRoom!);
+        await signalingService.joinRoom(savedRoom);
         setCurrentRoom(savedRoom);
       }
       catch (err) {
@@ -318,7 +320,7 @@ export default function App() {
             <div key={t.fileId} style={{ padding: 12, background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.85rem', marginBottom: 6 }}>
                 <span>
-                  {t.type === 'upload' ? '📤 Uploading' : '📥 Downloading'}: <strong>{t.fileName}</strong> ({t.progress}%)
+                  {t.type === 'upload' ? 'Uploading' : 'Downloading'}: <strong>{t.fileName}</strong> ({t.progress}%)
                 </span>
                 {t.type === 'upload' && (
                   <button
@@ -344,6 +346,7 @@ export default function App() {
                     {t.isCancelling ? 'Cancelling...' : 'Cancel'}
                   </button>
                 )}
+                <button></button>
               </div>
               <div style={{ width: '100%', height: 8, background: '#d1fae5', borderRadius: 4, overflow: 'hidden' }}>
                 <div
