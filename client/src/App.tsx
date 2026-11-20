@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { signalingService } from './services/signaling.service';
-import { webRTCService } from './services/webrtc.service';
+import { webRTCService, type UploadOutcome } from './services/webrtc.service';
 
 interface ReceivedMessage {
   senderId: string;
@@ -9,12 +9,33 @@ interface ReceivedMessage {
 }
 
 interface TransferStatus {
-  fileId: string;
+  rowId: string;       // `up:${uploadId}` or `down:${fileKey}`
+  transferId: string;  // uploadId for uploads, fileKey for downloads
   fileName: string;
   progress: number;
   type: 'upload' | 'download';
+  status: 'active' | 'paused';
+  resumed?: boolean;
   isCancelling?: boolean;
 }
+
+const UPLOAD_MESSAGES: Record<UploadOutcome, ((name: string) => string) | null> = {
+  done: (name) => `Sent file: ${name}`,
+  cancelled: (name) => `Cancelled transfer: ${name}`,
+  interrupted: (name) => `Transfer of ${name} was interrupted. It will resume when the peer reconnects.`,
+  failed: (name) => `Failed to send ${name}.`,
+  skipped: null,
+};
+
+// Paused downloads survive leaving/joining rooms; everything else is reset
+const keepPaused = (prev: Record<string, TransferStatus>) =>
+  Object.fromEntries(Object.entries(prev).filter(([, t]) => t.status === 'paused'));
+
+const withoutRow = (prev: Record<string, TransferStatus>, rowId: string) => {
+  const copy = { ...prev };
+  delete copy[rowId];
+  return copy;
+};
 
 export default function App() {
   const [connectionId, setConnectionId] = useState<string>('Connecting...');
@@ -50,36 +71,67 @@ export default function App() {
 
     //incoming file transfer progress
     // keyed per sender so two peers sending at once don't overwrite each other
-    webRTCService.onFileProgress = (senderId, fileId, fileName, progressPercent) => {
-      const key = `${senderId}::${fileId}`;
+    // keyed by file, not sender, so a resumed download (new peer ID) updates the same row
+    webRTCService.onFileProgress = (_senderId, fileKey, fileName, progressPercent) => {
+      const rowId = `down:${fileKey}`;
       setTransfers((prev) => ({
         ...prev,
-        [key]: {
-          fileId: key,
+        [rowId]: {
+          rowId,
+          transferId: fileKey,
           fileName,
           progress: progressPercent,
           type: 'download',
+          status: 'active',
         },
       }));
       if (progressPercent >= 100) {
         setTimeout(() => {
-          setTransfers((prev) => {
-            const copy = { ...prev };
-            delete copy[key];
-            return copy;
-          });
+          setTransfers((prev) => (prev[rowId]?.status === 'active' ? withoutRow(prev, rowId) : prev));
         }, 3000);
       }
     }
 
+    //incoming transfer lost its sender; the data so far is kept on disk
+    webRTCService.onFilePaused = (fileKey, fileName, progressPercent) => {
+      const rowId = `down:${fileKey}`;
+      setTransfers((prev) => ({
+        ...prev,
+        [rowId]: { rowId, transferId: fileKey, fileName, progress: progressPercent, type: 'download', status: 'paused' },
+      }));
+    }
+
+    //outgoing transfers, including ones resumed at a peer's request
+    webRTCService.onUploadProgress = (uploadId, fileName, progressPercent, resumed) => {
+      const rowId = `up:${uploadId}`;
+      setTransfers((prev) => ({
+        ...prev,
+        [rowId]: {
+          rowId,
+          transferId: uploadId,
+          fileName,
+          progress: progressPercent,
+          type: 'upload',
+          status: 'active',
+          resumed,
+          isCancelling: prev[rowId]?.isCancelling ?? false,
+        },
+      }));
+    }
+
+    webRTCService.onUploadFinished = (uploadId, fileName, outcome) => {
+      setTransfers((prev) => withoutRow(prev, `up:${uploadId}`));
+      const describe = UPLOAD_MESSAGES[outcome];
+      if (!describe) return;
+      setMessages((prev) => [
+        ...prev,
+        { senderId: 'Me', text: describe(fileName), timestamp: new Date().toLocaleTimeString() },
+      ]);
+    }
+
     //incoming file transfer cancelled
-    webRTCService.onFileCancelled = (senderId, fileId, fileName) => {
-      const key = `${senderId}::${fileId}`;
-      setTransfers((prev) => {
-        const copy = { ...prev };
-        delete copy[key];
-        return copy;
-      });
+    webRTCService.onFileCancelled = (senderId, fileKey, fileName) => {
+      setTransfers((prev) => withoutRow(prev, `down:${fileKey}`));
       setMessages((prev) => [
         ...prev,
         {
@@ -107,6 +159,26 @@ export default function App() {
         },
       ]);
     }
+
+    // Partly received files from before a reload show up as paused
+    webRTCService.restoreTransfers().then((paused) => {
+      setTransfers((prev) => {
+        const next = { ...prev };
+        for (const p of paused) {
+          const rowId = `down:${p.fileKey}`;
+          if (next[rowId]) continue; // already resumed in the meantime
+          next[rowId] = {
+            rowId,
+            transferId: p.fileKey,
+            fileName: p.fileName,
+            progress: p.progressPercent,
+            type: 'download',
+            status: 'paused',
+          };
+        }
+        return next;
+      });
+    });
 
     return () => {
       signalingService.disconnect();
@@ -150,7 +222,7 @@ export default function App() {
     setCurrentRoom(trimmed);
     sessionStorage.setItem('p2p_room', trimmed);
     setMessages([]);
-    setTransfers({});
+    setTransfers(keepPaused);
   }
 
   const handleLeaveRoom = async() => {
@@ -160,7 +232,7 @@ export default function App() {
     setCurrentRoom(null);
     sessionStorage.removeItem('p2p_room');
     setMessages([]);
-    setTransfers({});
+    setTransfers(keepPaused);
   }
 
   const handleSendMessage = () => {
@@ -175,51 +247,11 @@ export default function App() {
     const files = e.target.files;
     if(!files || files.length === 0 || connectedPeers.length === 0) return;
 
-    Array.from(files).forEach(async (file) => {
-      let currentFileId = '';
-      try{
-        await webRTCService.sendFile(
-          file,
-          (fileId) => {
-            currentFileId = fileId;
-            setTransfers((prev) => ({
-              ...prev,
-              [fileId]: {fileId, fileName: file.name, progress: 0, type: 'upload', isCancelling: false}
-            }));
-          },
-          (percent) => {
-            setTransfers((prev) => {
-              if(!currentFileId) return prev;
-              return {
-                ...prev,
-                [currentFileId]: {...prev[currentFileId], progress: percent}
-              }
-            });
-          }
-        );
-        setMessages((prev) => [
-          ...prev,
-          { senderId: 'Me', text: `Sent file: ${file.name}`, timestamp: new Date().toLocaleTimeString() },
-        ]);
-      }
-      catch(error:any){
-        if(error.name === 'AbortError'){
-            setMessages((prev) => [
-            ...prev,
-            { senderId: 'Me', text: `Cancelled transfer: ${file.name}`, timestamp: new Date().toLocaleTimeString() },
-          ]);
-        }
-        else{
-            console.error('File transfer error:', error);
-        }
-      }
-      finally{
-        setTransfers((prev) => {
-          const copy = { ...prev };
-          if(currentFileId) delete copy[currentFileId];
-          return copy;
-        });
-      }
+    // progress and results arrive through onUploadProgress / onUploadFinished
+    Array.from(files).forEach((file) => {
+      webRTCService.sendFile(file).catch((error) => {
+        console.error('File transfer error:', error);
+      });
     });
 
     if(fileInputRef.current) { fileInputRef.current.value = ''; } //reset file input
@@ -317,10 +349,21 @@ export default function App() {
       {Object.keys(transfers).length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14 }}>
           {Object.values(transfers).map((t) => (
-            <div key={t.fileId} style={{ padding: 12, background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 8 }}>
+            <div
+              key={t.rowId}
+              style={{
+                padding: 12,
+                background: t.status === 'paused' ? '#fffbeb' : '#ecfdf5',
+                border: `1px solid ${t.status === 'paused' ? '#fde68a' : '#a7f3d0'}`,
+                borderRadius: 8,
+              }}
+            >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.85rem', marginBottom: 6 }}>
                 <span>
-                  {t.type === 'upload' ? 'Uploading' : 'Downloading'}: <strong>{t.fileName}</strong> ({t.progress}%)
+                  {t.type === 'upload'
+                    ? (t.resumed ? 'Resuming upload' : 'Uploading')
+                    : (t.status === 'paused' ? 'Paused, waiting for sender' : 'Downloading')}
+                  : <strong>{t.fileName}</strong> ({t.progress}%)
                 </span>
                 {t.type === 'upload' && (
                   <button
@@ -328,9 +371,9 @@ export default function App() {
                     onClick={() => {
                       setTransfers((prev) => ({
                         ...prev,
-                        [t.fileId]: { ...prev[t.fileId], isCancelling: true },
+                        [t.rowId]: { ...prev[t.rowId], isCancelling: true },
                       }));
-                      webRTCService.cancelTransfer(t.fileId);
+                      webRTCService.cancelTransfer(t.transferId);
                     }}
                     style={{
                       padding: '2px 8px',
@@ -346,14 +389,33 @@ export default function App() {
                     {t.isCancelling ? 'Cancelling...' : 'Cancel'}
                   </button>
                 )}
-                <button></button>
+                {t.type === 'download' && t.status === 'paused' && (
+                  <button
+                    onClick={() => {
+                      setTransfers((prev) => withoutRow(prev, t.rowId));
+                      webRTCService.discardIncoming(t.transferId).catch((err) => console.error('Failed to discard transfer:', err));
+                    }}
+                    style={{
+                      padding: '2px 8px',
+                      background: '#64748b',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                    }}
+                  >
+                    Discard
+                  </button>
+                )}
               </div>
               <div style={{ width: '100%', height: 8, background: '#d1fae5', borderRadius: 4, overflow: 'hidden' }}>
                 <div
                   style={{
                     width: `${t.progress}%`,
                     height: '100%',
-                    background: '#10b981',
+                    background: t.status === 'paused' ? '#f59e0b' : '#10b981',
                     transition: 'width 0.15s ease',
                   }}
                 />
