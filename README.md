@@ -136,7 +136,5 @@ A probe message was echoed back over the chat channel while 1, 3 or 5 large file
 - **No TURN server.** Only STUN is configured, so peers behind strict NATs or firewalls can't connect. Production use would add a TURN relay (e.g. coturn) with short-lived credentials issued by the signaling server.
 - **Full mesh,** so practical for small rooms only (see the mesh benchmark above).
 - **Chat is delayed during large transfers** (see the chat latency benchmark above).
-- **localhost only.** The hub URL and CORS origin are hard-coded.
 - **The sender must keep its tab open,** or pick the same file again, for a resume to complete.
 - **The file identity is a fingerprint** (name, size and modified time), not a hash of the contents. Data is still protected in transit by WebRTC's DTLS encryption.
-- **A 500 ms fixed delay** before auto-rejoin (see connection setup above).
