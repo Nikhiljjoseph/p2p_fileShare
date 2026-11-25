@@ -7,8 +7,6 @@ const RTC_CONFIG: RTCConfiguration = {
     ],
 };
 
-const CHUNK_SIZE = 16 * 1024; // 16KB chunk size
-const BUFFER_THRESHOLD = 64 * 1024; // 64KB untill the buffer is full
 const FLUSH_EVERY_CHUNKS = 64; // receiver persists data in ~1MB batches (64 x 16KB)
 const CHAT_CHANNEL_LABEL = 'chat-channel'; // must match on both ends of the router
 const FILE_CHANNEL_PREFIX = 'file-';
@@ -16,12 +14,6 @@ const CHANNEL_OPEN_TIMEOUT = 15000; // give a fresh file channel this long to op
 const REPLY_TIMEOUT = 15000; // how long a sender waits for the receiver's file-ack
 const DELIVERY_TIMEOUT = 30000; // how long a sender waits for the receiver to confirm it saved everything
 const CLIENT_ID_KEY = 'p2p_client_id';
-
-// ---- Wire protocol ----
-// File channel:  sender -> file-meta, receiver -> file-ack | file-decline, sender -> chunks...
-//                either side may send file-cancel. The receiver closes the channel once the
-//                whole file is saved, which doubles as the delivery confirmation.
-// Chat channel:  JSON envelopes, so control messages can share it with chat text.
 
 export interface FileMetadata {
     type: 'file-meta';
@@ -125,6 +117,7 @@ function abortError(): DOMException {
 }
 
 export class WebRTCService {
+    public currentChunkSize = 64 * 1024; // the bufferedAmountLowThreshold is twice the chunk size with a flooe of 64kb
     private peers = new Map<string, PeerSession>();
     private readonly clientId = getClientId();
     // Receiving side
@@ -778,7 +771,8 @@ export class WebRTCService {
         const controller = new AbortController();
         this.activeUploads.set(uploadId, { controller, fileKey });
 
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const chunkSize = this.currentChunkSize;
+        const totalChunks = Math.ceil(file.size / chunkSize);
         const sentByPeer = new Map<string, number>(); // peers still receiving -> chunks sent
         let lastPercent = 0;
         const report = () => {
@@ -846,8 +840,9 @@ export class WebRTCService {
         const waitSignal = AbortSignal.any([signal, session.teardown.signal]);
         const fileId = crypto.randomUUID();
         const dc = session.peerConnection.createDataChannel(`${FILE_CHANNEL_PREFIX}${fileId}`);
+        const bufferThreshold = Math.max(64 * 1024, this.currentChunkSize * 2);
         dc.binaryType = 'arraybuffer';
-        dc.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
+        dc.bufferedAmountLowThreshold = bufferThreshold;
 
         try {
             // Must not start chunking before the channel is open, otherwise
@@ -864,7 +859,7 @@ export class WebRTCService {
                 fileKey,
                 fileName: file.name,
                 fileSize: file.size,
-                chunkSize: CHUNK_SIZE,
+                chunkSize: this.currentChunkSize,
                 totalChunks,
             };
             const reply = this.waitForReply(dc, fileKey, waitSignal); // listen before sending
@@ -879,11 +874,11 @@ export class WebRTCService {
 
             for(let i = fromChunk; i < totalChunks; i++){
                 if(signal.aborted) throw abortError();
-                if(dc.bufferedAmount > BUFFER_THRESHOLD) {
+                if(dc.bufferedAmount > bufferThreshold) {
                     await this.waitForDrain(dc, waitSignal);
                 }
                 if(dc.readyState !== 'open') return 'interrupted';
-                const buffer = await file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE).arrayBuffer();
+                const buffer = await file.slice(i * this.currentChunkSize, (i + 1) * this.currentChunkSize).arrayBuffer();
                 if(dc.readyState !== 'open') return 'interrupted';
                 dc.send(buffer);
                 onSent(i + 1);
