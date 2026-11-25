@@ -784,7 +784,7 @@ export class WebRTCService {
             this.onUploadProgress?.(uploadId, file.name, percent, resumed);
         };
         this.onUploadProgress?.(uploadId, file.name, 0, resumed);
-
+        const uploadStart = performance.now();
         let outcome: UploadOutcome = 'failed';
         try {
             const results = await Promise.allSettled(peerIds.map((peerId) =>
@@ -811,6 +811,18 @@ export class WebRTCService {
                 else outcome = 'failed';
             }
         } finally {
+            if (outcome === 'done' && !resumed) {
+        const elapsedSec = (performance.now() - uploadStart) / 1000;
+        const receiverCount = peerIds.length;
+        const groupSize = receiverCount + 1; // sender + receivers
+        const fileSizeMB = file.size / (1024 * 1024);
+        const totalSentMB = fileSizeMB * receiverCount;
+        const aggregateMBs = +(totalSentMB / elapsedSec).toFixed(2);
+        const perPeerMBs = +(fileSizeMB / elapsedSec).toFixed(2);
+        console.log(
+            `[BENCH_MESH_UPLOAD] group_size=${groupSize} receivers=${receiverCount} file="${file.name}" file_mb=${fileSizeMB.toFixed(2)} total_sent_mb=${totalSentMB.toFixed(2)} elapsed_s=${elapsedSec.toFixed(3)} agg_MBs=${aggregateMBs} per_peer_MBs=${perPeerMBs}`
+        );
+    }
             this.activeUploads.delete(uploadId);
             // A cancelled file must not be resumed by a later resume-request
             if(outcome === 'cancelled') this.sharedFiles.delete(fileKey);

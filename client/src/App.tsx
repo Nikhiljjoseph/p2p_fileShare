@@ -50,13 +50,31 @@ export default function App() {
 
   // Initialize connection and set up event listeners
   useEffect(() => {
-    signalingService.startConnection('http://localhost:5041/hubs/signaling')
-      .then((id) => setConnectionId(id))
-      .catch((err) => console.error(err));
-    
+    let active = true;
+
+    const init = async () => {
+      try {
+        const id = await signalingService.startConnection('http://localhost:5041/hubs/signaling');
+        if (!active) return;
+        setConnectionId(id);
+
+        const savedRoom = sessionStorage.getItem('p2p_room');
+        if (savedRoom) {
+          setRoomInput(savedRoom);
+          await signalingService.joinRoom(savedRoom);
+          if (!active) return;
+          setCurrentRoom(savedRoom);
+        }
+      } catch (err) {
+        if (active) console.error(err);
+      }
+    };
+
+    void init();
+
     webRTCService.onPeersChange = (peers) => {
       setConnectedPeers([...peers]);
-    }
+    };
 
     webRTCService.onMessageReceived = (senderId, text) => {
       setMessages((prev) => [
@@ -67,11 +85,8 @@ export default function App() {
           timestamp: new Date().toLocaleTimeString(),
         },
       ]);
-    }
+    };
 
-    //incoming file transfer progress
-    // keyed per sender so two peers sending at once don't overwrite each other
-    // keyed by file, not sender, so a resumed download (new peer ID) updates the same row
     webRTCService.onFileProgress = (_senderId, fileKey, fileName, progressPercent) => {
       const rowId = `down:${fileKey}`;
       setTransfers((prev) => ({
@@ -90,18 +105,16 @@ export default function App() {
           setTransfers((prev) => (prev[rowId]?.status === 'active' ? withoutRow(prev, rowId) : prev));
         }, 3000);
       }
-    }
+    };
 
-    //incoming transfer lost its sender; the data so far is kept on disk
     webRTCService.onFilePaused = (fileKey, fileName, progressPercent) => {
       const rowId = `down:${fileKey}`;
       setTransfers((prev) => ({
         ...prev,
         [rowId]: { rowId, transferId: fileKey, fileName, progress: progressPercent, type: 'download', status: 'paused' },
       }));
-    }
+    };
 
-    //outgoing transfers, including ones resumed at a peer's request
     webRTCService.onUploadProgress = (uploadId, fileName, progressPercent, resumed) => {
       const rowId = `up:${uploadId}`;
       setTransfers((prev) => ({
@@ -117,7 +130,7 @@ export default function App() {
           isCancelling: prev[rowId]?.isCancelling ?? false,
         },
       }));
-    }
+    };
 
     webRTCService.onUploadFinished = (uploadId, fileName, outcome) => {
       setTransfers((prev) => withoutRow(prev, `up:${uploadId}`));
@@ -127,9 +140,8 @@ export default function App() {
         ...prev,
         { senderId: 'Me', text: describe(fileName), timestamp: new Date().toLocaleTimeString() },
       ]);
-    }
+    };
 
-    //incoming file transfer cancelled
     webRTCService.onFileCancelled = (senderId, fileKey, fileName) => {
       setTransfers((prev) => withoutRow(prev, `down:${fileKey}`));
       setMessages((prev) => [
@@ -140,9 +152,8 @@ export default function App() {
           timestamp: new Date().toLocaleTimeString(),
         },
       ]);
-    }
+    };
 
-    //trigger download after file is fully received
     webRTCService.onFileReceived = (senderId, fileName, fileBlob) => {
       const url = URL.createObjectURL(fileBlob);
       const a = document.createElement('a');
@@ -158,15 +169,14 @@ export default function App() {
           timestamp: new Date().toLocaleTimeString(),
         },
       ]);
-    }
+    };
 
-    // Partly received files from before a reload show up as paused
     webRTCService.restoreTransfers().then((paused) => {
       setTransfers((prev) => {
         const next = { ...prev };
         for (const p of paused) {
           const rowId = `down:${p.fileKey}`;
-          if (next[rowId]) continue; // already resumed in the meantime
+          if (next[rowId]) continue;
           next[rowId] = {
             rowId,
             transferId: p.fileKey,
@@ -181,7 +191,7 @@ export default function App() {
     });
 
     return () => {
-      signalingService.disconnect();
+      active = false;
     };
   }, []);
 
@@ -191,24 +201,24 @@ export default function App() {
   }, [messages]);
 
   // Load last joined room from sessionstorage on mount
-  useEffect(() => {
-    const savedRoom = sessionStorage.getItem('p2p_room');
-    if (!savedRoom) return;
-    setRoomInput(savedRoom);
-    const autoJoin = async () => {
-      try {
-        //tiny delay for establishing connection before joining room
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        await signalingService.joinRoom(savedRoom);
-        setCurrentRoom(savedRoom);
-      }
-      catch (err) {
-        console.error('Failed to auto-join room:', err);
-        sessionStorage.removeItem('p2p_room');
-      }
-    }
-    autoJoin();
-  }, []);
+  // useEffect(() => {
+  //   const savedRoom = sessionStorage.getItem('p2p_room');
+  //   if (!savedRoom) return;
+  //   setRoomInput(savedRoom);
+  //   const autoJoin = async () => {
+  //     try {
+  //       //tiny delay for establishing connection before joining room
+  //       await new Promise((resolve) => setTimeout(resolve, 500));
+  //       await signalingService.joinRoom(savedRoom);
+  //       setCurrentRoom(savedRoom);
+  //     }
+  //     catch (err) {
+  //       console.error('Failed to auto-join room:', err);
+  //       sessionStorage.removeItem('p2p_room');
+  //     }
+  //   }
+  //   autoJoin();
+  // }, []);
 
   const  handleJoinRoom = async() => {
     const trimmed = roomInput.trim();
