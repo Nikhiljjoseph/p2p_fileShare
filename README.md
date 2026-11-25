@@ -42,8 +42,6 @@ Built with React, TypeScript, WebRTC, IndexedDB, and ASP.NET Core SignalR.
 
 **Resuming:** transfers are matched by `fileKey`, not by peer ID, because peer IDs change on every reconnect. When a chat channel opens, the receiver sends a `resume-request` for each unfinished file. Any peer that still has the file continues the transfer. If the sender reloaded, picking the same file again resumes it automatically.
 
-For a full walkthrough of the code, see [`CODE_WALKTHROUGH.md`](CODE_WALKTHROUGH.md).
-
 ---
 
 ## Getting started
